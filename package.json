@@ -1,0 +1,33 @@
+{
+  "name": "@qviks/chat",
+  "version": "1.0.0",
+  "description": "AI assistant for our Next.js sites: chat widget + streaming route handler (OpenAI), human check (Turnstile), rate limits, history stored in Qviks.",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "files": ["dist", "README.md"],
+  "exports": {
+    ".": { "types": "./dist/client.d.ts", "default": "./dist/client.js" },
+    "./server": { "types": "./dist/server.d.ts", "default": "./dist/server.js" }
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@qviks/track": "github:meacoolash/qviks-track#v1.2.0"
+  },
+  "peerDependencies": {
+    "next": ">=14",
+    "react": ">=18"
+  },
+  "devDependencies": {
+    "@types/bun": "1.2.20",
+    "@types/node": "22.15.3",
+    "@types/react": "19.2.2",
+    "next": "16.2.6",
+    "react": "19.2.6",
+    "typescript": "5.9.3"
+  }
+}
