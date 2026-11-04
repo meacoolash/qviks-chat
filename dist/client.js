@@ -12,6 +12,11 @@ const EN = {
     send: "Send",
     typing: "Typing...",
     offline: "Sorry, I couldn't connect. Please try again.",
+    leadName: "Your name",
+    leadEmail: "Your email",
+    leadSend: "Send",
+    leadSent: "Got it, thank you!",
+    leadError: "Could not send. Please try again.",
 };
 /** Slovak labels, ready to pass as `labels`. */
 export const SK_LABELS = {
@@ -23,6 +28,11 @@ export const SK_LABELS = {
     send: "Poslať",
     typing: "Píšem...",
     offline: "Prepáčte, nepodarilo sa pripojiť. Skúste to prosím znova.",
+    leadName: "Vaše meno",
+    leadEmail: "Váš e-mail",
+    leadSend: "Poslať",
+    leadSent: "Mám to, ďakujem!",
+    leadError: "Nepodarilo sa odoslať. Skúste to prosím znova.",
 };
 const CSS = `
 .qc-panel{position:fixed;bottom:6rem;left:1rem;right:1rem;z-index:2147483000;display:flex;flex-direction:column;height:28rem;max-height:70vh;border:1px solid #e4e2dc;border-radius:1rem;background:#fff;color:#1f2328;box-shadow:0 20px 25px -5px rgba(0,0,0,.1),0 8px 10px -6px rgba(0,0,0,.1);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;text-align:left}
@@ -38,6 +48,11 @@ const CSS = `
 .qc-sugs{display:flex;flex-direction:column;align-items:flex-end;gap:.5rem;padding-top:.25rem}
 .qc-sug{background:none;border:1px solid var(--qc-accent);border-radius:1rem;padding:.375rem .75rem;font:inherit;color:var(--qc-accent);cursor:pointer;text-align:right}
 .qc-sug:hover{background:#eef3f1}
+.qc-lead{display:flex;flex-direction:column;gap:.5rem;align-self:stretch;max-width:85%;border:1px solid var(--qc-accent);border-radius:1rem;padding:.75rem;background:#fff}
+.qc-lead .qc-in{font-size:14px}
+.qc-lead-send{align-self:flex-end;padding:.5rem 1rem}
+.qc-err{margin:0;color:#b42318;font-size:13px}
+.qc-hp{position:absolute;left:-9999px;width:0;height:0;opacity:0}
 .qc-form{display:flex;gap:.5rem;padding:.75rem;border-top:1px solid #e4e2dc}
 .qc-in{flex:1;min-width:0;border:1px solid #e4e2dc;border-radius:.5rem;padding:.5rem .75rem;font:inherit;font-size:16px;color:inherit;background:#fff;outline:none}
 .qc-in:focus{border-color:var(--qc-accent)}
@@ -117,7 +132,7 @@ function Linkified({ text, rewrite, onNavigate }) {
     parts.push(text.slice(last));
     return _jsx(_Fragment, { children: parts });
 }
-export function ChatWidget({ site, name, greeting, suggestions: all, accent = "#2f6f5e", labels, links = false, rewriteLink, buttonStyle, icon, endpoint = "/api/chat", }) {
+export function ChatWidget({ site, name, greeting, suggestions: all, accent = "#2f6f5e", labels, links = false, rewriteLink, buttonStyle, icon, endpoint = "/api/chat", leadEndpoint = "/api/lead", leadTopic = "AI chat", }) {
     const t = { ...EN, ...labels };
     const storageKey = `qviks-chat-${site}`;
     const [open, setOpen] = useState(false);
@@ -126,6 +141,9 @@ export function ChatWidget({ site, name, greeting, suggestions: all, accent = "#
     const [busy, setBusy] = useState(false);
     // Picked on open, not on render, so server and client markup never differ.
     const [suggestions, setSuggestions] = useState([]);
+    // Name + e-mail card: shown after a 503 (assistant down) or 429 (rate limited) answer, so the
+    // visitor's question reaches the owner as a lead instead of dying in the chat.
+    const [lead, setLead] = useState("off");
     const listRef = useRef(null);
     const sidRef = useRef(null);
     // Restore the conversation after mount (sessionStorage is browser-only).
@@ -144,7 +162,7 @@ export function ChatWidget({ site, name, greeting, suggestions: all, accent = "#
     }, [storageKey]);
     useEffect(() => {
         listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
-    }, [messages, suggestions, open]);
+    }, [messages, suggestions, open, lead]);
     function save(next) {
         if (!sidRef.current)
             return;
@@ -213,6 +231,9 @@ export function ChatWidget({ site, name, greeting, suggestions: all, accent = "#
                     break;
                 append(decoder.decode(value, { stream: true }));
             }
+            // Assistant down or rate limited: the reply text asks for contact details, the card below takes them.
+            if (res.status === 503 || res.status === 429)
+                setLead("ask");
         }
         catch {
             append(t.offline);
@@ -223,8 +244,46 @@ export function ChatWidget({ site, name, greeting, suggestions: all, accent = "#
             setSuggestions(pickSuggestions(all, history.filter((m) => m.role === "user").map((m) => m.content), 2));
         }
     }
+    async function sendLead(e) {
+        e.preventDefault();
+        if (lead === "sending")
+            return;
+        const f = new FormData(e.currentTarget);
+        const body = {
+            site,
+            name: String(f.get("name") ?? "").trim(),
+            email: String(f.get("email") ?? "").trim(),
+            message: messages.filter((m) => m.role === "user").map((m) => m.content).join("\n"),
+            topic: leadTopic,
+            source: "lead_form",
+            hp_url: String(f.get("hp_url") ?? ""),
+            locale: document.documentElement.lang || undefined,
+        };
+        if (!body.name || !body.email)
+            return;
+        setLead("sending");
+        try {
+            const post = (turnstile) => fetch(leadEndpoint, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ ...body, turnstile, elapsedMs: Math.round(performance.now()) }),
+            });
+            let res = await post();
+            // The lead endpoint wants a human check: 428 (createLeadHandler) or 400 { error: "turnstile" } (sites).
+            const data = res.ok ? null : (await res.clone().json().catch(() => null));
+            if (res.status === 428 || (res.status === 400 && data?.error === "turnstile")) {
+                const token = data?.turnstile ? await getTurnstileToken(data.turnstile) : "";
+                if (token)
+                    res = await post(token);
+            }
+            setLead(res.ok ? "sent" : "error");
+        }
+        catch {
+            setLead("error");
+        }
+    }
     const shown = [{ role: "assistant", content: greeting }, ...messages];
-    return (_jsxs("div", { style: { "--qc-accent": accent }, children: [_jsx("style", { children: CSS }), open && (_jsxs("div", { className: "qc-panel", role: "dialog", "aria-label": t.header.replace("{name}", name), children: [_jsxs("div", { className: "qc-head", children: [_jsx("span", { children: t.header.replace("{name}", name) }), _jsx("button", { type: "button", onClick: () => setOpen(false), className: "qc-x", "aria-label": t.closeChat, children: t.close })] }), _jsxs("div", { ref: listRef, className: "qc-list", "aria-live": "polite", children: [shown.map((m, i) => (_jsx("div", { className: `qc-msg ${m.role === "user" ? "qc-user" : "qc-bot"}`, children: m.content ? (links && m.role === "assistant" ? (_jsx(Linkified, { text: m.content, rewrite: rewriteLink, onNavigate: () => setOpen(false) })) : (m.content)) : (_jsx("span", { className: "qc-dim", children: t.typing })) }, i))), !busy && suggestions.length > 0 && (_jsx("div", { className: "qc-sugs", children: suggestions.map((q) => (_jsx("button", { type: "button", onClick: () => send(q), className: "qc-sug", children: q }, q))) }))] }), _jsxs("form", { onSubmit: (e) => {
+    return (_jsxs("div", { style: { "--qc-accent": accent }, children: [_jsx("style", { children: CSS }), open && (_jsxs("div", { className: "qc-panel", role: "dialog", "aria-label": t.header.replace("{name}", name), children: [_jsxs("div", { className: "qc-head", children: [_jsx("span", { children: t.header.replace("{name}", name) }), _jsx("button", { type: "button", onClick: () => setOpen(false), className: "qc-x", "aria-label": t.closeChat, children: t.close })] }), _jsxs("div", { ref: listRef, className: "qc-list", "aria-live": "polite", children: [shown.map((m, i) => (_jsx("div", { className: `qc-msg ${m.role === "user" ? "qc-user" : "qc-bot"}`, children: m.content ? (links && m.role === "assistant" ? (_jsx(Linkified, { text: m.content, rewrite: rewriteLink, onNavigate: () => setOpen(false) })) : (m.content)) : (_jsx("span", { className: "qc-dim", children: t.typing })) }, i))), lead === "sent" && _jsxs("div", { className: "qc-msg qc-bot", children: ["\uD83C\uDF89 ", t.leadSent] }), lead !== "off" && lead !== "sent" && (_jsxs("form", { onSubmit: sendLead, className: "qc-lead", children: [_jsx("input", { name: "hp_url", tabIndex: -1, autoComplete: "off", "aria-hidden": "true", className: "qc-hp" }), _jsx("input", { required: true, name: "name", autoComplete: "name", placeholder: t.leadName, "aria-label": t.leadName, maxLength: 120, className: "qc-in" }), _jsx("input", { required: true, type: "email", name: "email", autoComplete: "email", placeholder: t.leadEmail, "aria-label": t.leadEmail, className: "qc-in" }), lead === "error" && _jsx("p", { className: "qc-err", children: t.leadError }), _jsx("button", { disabled: lead === "sending", className: "qc-send qc-lead-send", children: t.leadSend })] })), !busy && (lead === "off" || lead === "sent") && suggestions.length > 0 && (_jsx("div", { className: "qc-sugs", children: suggestions.map((q) => (_jsx("button", { type: "button", onClick: () => send(q), className: "qc-sug", children: q }, q))) }))] }), _jsxs("form", { onSubmit: (e) => {
                             e.preventDefault();
                             send(input);
                         }, className: "qc-form", children: [_jsx("input", { value: input, onChange: (e) => setInput(e.target.value), placeholder: t.placeholder, maxLength: 2000, className: "qc-in", "aria-label": t.placeholder }), _jsx("button", { disabled: busy, className: "qc-send", children: t.send })] })] })), _jsx("button", { type: "button", onClick: toggle, className: "qc-btn", style: buttonStyle, "aria-label": icon ? (open ? t.closeChat : t.open) : undefined, title: icon ? (open ? t.closeChat : t.open) : undefined, children: icon ? (open ? (_jsx("svg", { width: "20", height: "20", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.8", strokeLinecap: "round", "aria-hidden": true, children: _jsx("path", { d: "M6 6l12 12M18 6L6 18" }) })) : (icon)) : open ? (t.closeChat) : (t.open) })] }));

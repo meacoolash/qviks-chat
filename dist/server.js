@@ -87,9 +87,12 @@ async function verifyToken(token, ip) {
         return false;
     }
 }
-/* ─── OpenAI stream ─────────────────────────────────────────────────────── */
-/** Yields the text deltas of an OpenAI chat completion stream (SSE). */
-async function* openaiStream(opts) {
+/**
+ * Opens an OpenAI chat completion stream. Throws (with the error code) when OpenAI
+ * refuses: no credit, bad key, outage. Awaited BEFORE the Response is built, so such a
+ * failure answers 503 and the widget can ask the visitor for an e-mail instead.
+ */
+async function openOpenai(opts) {
     const res = await fetch(OPENAI_URL, {
         method: "POST",
         signal: AbortSignal.timeout(OPENAI_TIMEOUT_MS),
@@ -105,7 +108,10 @@ async function* openaiStream(opts) {
         catch { }
         throw new Error(reason);
     }
-    const reader = res.body.getReader();
+    return res.body.getReader();
+}
+/** Yields the text deltas of an opened OpenAI stream (SSE). */
+async function* readDeltas(reader) {
     const decoder = new TextDecoder();
     let buffer = "";
     for (;;) {
@@ -133,7 +139,8 @@ async function* openaiStream(opts) {
  * Body from the widget: { session_id, messages: [{ role, content }], path?, locale?,
  * referrer?, utm_source?, utm_medium?, utm_campaign?, visitor_id?, wd?, turnstile?, site? }.
  * Answers: 200 text stream, 403 foreign origin, 404 no assistant, 413, 400,
- * 428 { turnstile: siteKey } (human check needed), 429 / 503 with the site's reply text.
+ * 428 { turnstile: siteKey } (human check needed), 429 / 503 with the site's reply text
+ * (on both the widget shows a name + e-mail card and posts the question to its lead endpoint).
  */
 export function createChatHandler(opts) {
     const limited = rateLimiter(opts.limits ?? DEFAULT_LIMITS);
@@ -226,19 +233,33 @@ export function createChatHandler(opts) {
             }
         }
         const messages = [{ role: "system", content: assistant.system({ locale }) }, ...history];
+        const openai = { key: openaiKey, model: opts.model ?? "gpt-4.1-mini", maxTokens: opts.maxTokens ?? 600, messages };
+        // OpenAI refused (no credit, bad key, outage): 503 + the site's `down` reply. The widget
+        // then asks for name + e-mail and sends the question as a lead, so it is not lost.
+        let reader;
+        try {
+            reader = await openOpenai(openai);
+        }
+        catch (err) {
+            const reason = err instanceof Error ? err.message : String(err);
+            console.error("[qviks-chat] OpenAI:", reason);
+            void opts.onError?.(reason);
+            await logTurn("");
+            return text(replies.down, 503, headers);
+        }
         const encoder = new TextEncoder();
         const stream = new ReadableStream({
             async start(controller) {
                 let answer = "";
                 try {
-                    for await (const delta of openaiStream({ key: openaiKey, model: opts.model ?? "gpt-4.1-mini", maxTokens: opts.maxTokens ?? 600, messages })) {
+                    for await (const delta of readDeltas(reader)) {
                         answer += delta;
                         controller.enqueue(encoder.encode(delta));
                     }
                 }
                 catch (err) {
                     const reason = err instanceof Error ? err.message : String(err);
-                    console.error("[qviks-chat] OpenAI:", reason);
+                    console.error("[qviks-chat] OpenAI stream:", reason);
                     void opts.onError?.(reason);
                     controller.enqueue(encoder.encode(answer ? replies.cutOff : replies.down));
                 }

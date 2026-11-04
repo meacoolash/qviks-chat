@@ -42,11 +42,21 @@ import { ChatWidget, SK_LABELS } from "@qviks/chat";
 One app serving many sites: `assistant: (req, body) => ASSISTANTS[body.site]` and `key: (req, body) => ...`.
 Alerts when OpenAI fails: `onError: (reason) => sendMail(...)` (throttle on your side).
 
+## When the assistant is down
+
+OpenAI refused (no credit, bad key, outage) = `503` + the site's `down` reply, before any stream; rate limit = `429`.
+On both the widget shows a name + e-mail card under the reply and posts the visitor's questions to `leadEndpoint`
+(default `/api/lead`, e.g. `@qviks/track` `createLeadHandler`) as `{ site, name, email, message, topic: leadTopic
+("AI chat"), source: "lead_form", hp_url, locale, elapsedMs, turnstile? }`; a `428` or `400 { error: "turnstile",
+turnstile }` answer is retried once with a Turnstile token. Labels: `leadName`, `leadEmail`, `leadSend`, `leadSent`,
+`leadError` (in `SK_LABELS`). Write the `down` / `rateLimited` replies so they point at the card ("Nechajte tu svoje
+meno a e-mail..."), not at a form elsewhere on the page.
+
 ## Exports
 
 | Path | |
 |---|---|
-| `@qviks/chat` (client) | `ChatWidget`, `SK_LABELS`, types `ChatWidgetProps`, `ChatLabels` |
+| `@qviks/chat` (client) | `ChatWidget`, `SK_LABELS`, types `ChatWidgetProps`, `ChatLabels` (props `leadEndpoint`, `leadTopic` since 1.1.0) |
 | `@qviks/chat/server` | `createChatHandler`, `humanCheckEnabled`, `HUMAN_COOKIE`, types `Assistant`, `ChatReplies`, `ChatHandlerOptions` |
 
 ## Develop

@@ -66,11 +66,12 @@ describe("createChatHandler", () => {
     expect((await POST(chatReq(ask))).status).toBe(404);
   });
 
-  it("site reply + onError when OpenAI fails", async () => {
+  it("503 + site reply + onError when OpenAI refuses", async () => {
     fakeFetch([], 429);
     const reasons: string[] = [];
     const POST = createChatHandler({ assistant, openaiKey: "sk-test", onError: (r) => void reasons.push(r) });
     const res = await POST(chatReq(ask));
+    expect(res.status).toBe(503);
     expect(await res.text()).toBe("pauza");
     expect(reasons[0]).toContain("insufficient_quota");
   });

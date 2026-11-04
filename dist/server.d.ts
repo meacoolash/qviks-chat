@@ -1,7 +1,7 @@
 export type ChatReplies = {
     /** Too many messages from one IP. */
     rateLimited: string;
-    /** OpenAI down, out of credit or no key. */
+    /** OpenAI down, out of credit or no key: sent with 503, the widget then asks for name + e-mail under it. */
     down: string;
     /** Appended when the stream broke mid-answer. */
     cutOff: string;
@@ -45,7 +45,8 @@ export declare const humanCheckEnabled: () => boolean;
  * Body from the widget: { session_id, messages: [{ role, content }], path?, locale?,
  * referrer?, utm_source?, utm_medium?, utm_campaign?, visitor_id?, wd?, turnstile?, site? }.
  * Answers: 200 text stream, 403 foreign origin, 404 no assistant, 413, 400,
- * 428 { turnstile: siteKey } (human check needed), 429 / 503 with the site's reply text.
+ * 428 { turnstile: siteKey } (human check needed), 429 / 503 with the site's reply text
+ * (on both the widget shows a name + e-mail card and posts the question to its lead endpoint).
  */
 export declare function createChatHandler(opts: ChatHandlerOptions): (req: Request) => Promise<Response>;
 export {};

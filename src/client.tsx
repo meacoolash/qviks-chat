@@ -26,6 +26,12 @@ export type ChatLabels = {
   send: string;
   typing: string;
   offline: string;
+  /** Name + e-mail card shown when the assistant is down (503) or the visitor is rate limited (429). */
+  leadName: string;
+  leadEmail: string;
+  leadSend: string;
+  leadSent: string;
+  leadError: string;
 };
 
 const EN: ChatLabels = {
@@ -37,6 +43,11 @@ const EN: ChatLabels = {
   send: "Send",
   typing: "Typing...",
   offline: "Sorry, I couldn't connect. Please try again.",
+  leadName: "Your name",
+  leadEmail: "Your email",
+  leadSend: "Send",
+  leadSent: "Got it, thank you!",
+  leadError: "Could not send. Please try again.",
 };
 
 /** Slovak labels, ready to pass as `labels`. */
@@ -49,6 +60,11 @@ export const SK_LABELS: ChatLabels = {
   send: "Poslať",
   typing: "Píšem...",
   offline: "Prepáčte, nepodarilo sa pripojiť. Skúste to prosím znova.",
+  leadName: "Vaše meno",
+  leadEmail: "Váš e-mail",
+  leadSend: "Poslať",
+  leadSent: "Mám to, ďakujem!",
+  leadError: "Nepodarilo sa odoslať. Skúste to prosím znova.",
 };
 
 export type ChatWidgetProps = {
@@ -72,6 +88,15 @@ export type ChatWidgetProps = {
   icon?: React.ReactNode;
   /** Default: /api/chat. */
   endpoint?: string;
+  /**
+   * Where the name + e-mail card posts when the assistant is down or rate limited. Default: /api/lead
+   * (@qviks/track createLeadHandler or the site's own lead relay). Body: { site, name, email, message (the
+   * visitor's questions), topic, source: "lead_form", hp_url, locale, elapsedMs, turnstile? }; a 428 or
+   * 400 { error: "turnstile", turnstile: siteKey } answer is retried once with a Turnstile token.
+   */
+  leadEndpoint?: string;
+  /** `topic` of that lead (goes into the owner's e-mail subject). Default: "AI chat". */
+  leadTopic?: string;
 };
 
 const CSS = `
@@ -88,6 +113,11 @@ const CSS = `
 .qc-sugs{display:flex;flex-direction:column;align-items:flex-end;gap:.5rem;padding-top:.25rem}
 .qc-sug{background:none;border:1px solid var(--qc-accent);border-radius:1rem;padding:.375rem .75rem;font:inherit;color:var(--qc-accent);cursor:pointer;text-align:right}
 .qc-sug:hover{background:#eef3f1}
+.qc-lead{display:flex;flex-direction:column;gap:.5rem;align-self:stretch;max-width:85%;border:1px solid var(--qc-accent);border-radius:1rem;padding:.75rem;background:#fff}
+.qc-lead .qc-in{font-size:14px}
+.qc-lead-send{align-self:flex-end;padding:.5rem 1rem}
+.qc-err{margin:0;color:#b42318;font-size:13px}
+.qc-hp{position:absolute;left:-9999px;width:0;height:0;opacity:0}
 .qc-form{display:flex;gap:.5rem;padding:.75rem;border-top:1px solid #e4e2dc}
 .qc-in{flex:1;min-width:0;border:1px solid #e4e2dc;border-radius:.5rem;padding:.5rem .75rem;font:inherit;font-size:16px;color:inherit;background:#fff;outline:none}
 .qc-in:focus{border-color:var(--qc-accent)}
@@ -201,6 +231,8 @@ export function ChatWidget({
   buttonStyle,
   icon,
   endpoint = "/api/chat",
+  leadEndpoint = "/api/lead",
+  leadTopic = "AI chat",
 }: ChatWidgetProps) {
   const t = { ...EN, ...labels };
   const storageKey = `qviks-chat-${site}`;
@@ -210,6 +242,9 @@ export function ChatWidget({
   const [busy, setBusy] = useState(false);
   // Picked on open, not on render, so server and client markup never differ.
   const [suggestions, setSuggestions] = useState<string[]>([]);
+  // Name + e-mail card: shown after a 503 (assistant down) or 429 (rate limited) answer, so the
+  // visitor's question reaches the owner as a lead instead of dying in the chat.
+  const [lead, setLead] = useState<"off" | "ask" | "sending" | "error" | "sent">("off");
   const listRef = useRef<HTMLDivElement>(null);
   const sidRef = useRef<string | null>(null);
 
@@ -228,7 +263,7 @@ export function ChatWidget({
 
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
-  }, [messages, suggestions, open]);
+  }, [messages, suggestions, open, lead]);
 
   function save(next: Msg[]) {
     if (!sidRef.current) return;
@@ -298,12 +333,50 @@ export function ChatWidget({
         if (done) break;
         append(decoder.decode(value, { stream: true }));
       }
+      // Assistant down or rate limited: the reply text asks for contact details, the card below takes them.
+      if (res.status === 503 || res.status === 429) setLead("ask");
     } catch {
       append(t.offline);
     } finally {
       setBusy(false);
       save([...history, { role: "assistant", content: answer }]);
       setSuggestions(pickSuggestions(all, history.filter((m) => m.role === "user").map((m) => m.content), 2));
+    }
+  }
+
+  async function sendLead(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (lead === "sending") return;
+    const f = new FormData(e.currentTarget);
+    const body = {
+      site,
+      name: String(f.get("name") ?? "").trim(),
+      email: String(f.get("email") ?? "").trim(),
+      message: messages.filter((m) => m.role === "user").map((m) => m.content).join("\n"),
+      topic: leadTopic,
+      source: "lead_form",
+      hp_url: String(f.get("hp_url") ?? ""),
+      locale: document.documentElement.lang || undefined,
+    };
+    if (!body.name || !body.email) return;
+    setLead("sending");
+    try {
+      const post = (turnstile?: string) =>
+        fetch(leadEndpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...body, turnstile, elapsedMs: Math.round(performance.now()) }),
+        });
+      let res = await post();
+      // The lead endpoint wants a human check: 428 (createLeadHandler) or 400 { error: "turnstile" } (sites).
+      const data = res.ok ? null : ((await res.clone().json().catch(() => null)) as { error?: string; turnstile?: string } | null);
+      if (res.status === 428 || (res.status === 400 && data?.error === "turnstile")) {
+        const token = data?.turnstile ? await getTurnstileToken(data.turnstile) : "";
+        if (token) res = await post(token);
+      }
+      setLead(res.ok ? "sent" : "error");
+    } catch {
+      setLead("error");
     }
   }
 
@@ -334,7 +407,19 @@ export function ChatWidget({
                 )}
               </div>
             ))}
-            {!busy && suggestions.length > 0 && (
+            {lead === "sent" && <div className="qc-msg qc-bot">🎉 {t.leadSent}</div>}
+            {lead !== "off" && lead !== "sent" && (
+              <form onSubmit={sendLead} className="qc-lead">
+                <input name="hp_url" tabIndex={-1} autoComplete="off" aria-hidden="true" className="qc-hp" />
+                <input required name="name" autoComplete="name" placeholder={t.leadName} aria-label={t.leadName} maxLength={120} className="qc-in" />
+                <input required type="email" name="email" autoComplete="email" placeholder={t.leadEmail} aria-label={t.leadEmail} className="qc-in" />
+                {lead === "error" && <p className="qc-err">{t.leadError}</p>}
+                <button disabled={lead === "sending"} className="qc-send qc-lead-send">
+                  {t.leadSend}
+                </button>
+              </form>
+            )}
+            {!busy && (lead === "off" || lead === "sent") && suggestions.length > 0 && (
               <div className="qc-sugs">
                 {suggestions.map((q) => (
                   <button type="button" key={q} onClick={() => send(q)} className="qc-sug">

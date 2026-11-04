@@ -9,6 +9,12 @@ export type ChatLabels = {
     send: string;
     typing: string;
     offline: string;
+    /** Name + e-mail card shown when the assistant is down (503) or the visitor is rate limited (429). */
+    leadName: string;
+    leadEmail: string;
+    leadSend: string;
+    leadSent: string;
+    leadError: string;
 };
 /** Slovak labels, ready to pass as `labels`. */
 export declare const SK_LABELS: ChatLabels;
@@ -33,6 +39,15 @@ export type ChatWidgetProps = {
     icon?: React.ReactNode;
     /** Default: /api/chat. */
     endpoint?: string;
+    /**
+     * Where the name + e-mail card posts when the assistant is down or rate limited. Default: /api/lead
+     * (@qviks/track createLeadHandler or the site's own lead relay). Body: { site, name, email, message (the
+     * visitor's questions), topic, source: "lead_form", hp_url, locale, elapsedMs, turnstile? }; a 428 or
+     * 400 { error: "turnstile", turnstile: siteKey } answer is retried once with a Turnstile token.
+     */
+    leadEndpoint?: string;
+    /** `topic` of that lead (goes into the owner's e-mail subject). Default: "AI chat". */
+    leadTopic?: string;
 };
 type Turnstile = {
     render: (el: HTMLElement, opts: Record<string, unknown>) => string;
@@ -43,5 +58,5 @@ declare global {
         turnstile?: Turnstile;
     }
 }
-export declare function ChatWidget({ site, name, greeting, suggestions: all, accent, labels, links, rewriteLink, buttonStyle, icon, endpoint, }: ChatWidgetProps): import("react/jsx-runtime").JSX.Element;
+export declare function ChatWidget({ site, name, greeting, suggestions: all, accent, labels, links, rewriteLink, buttonStyle, icon, endpoint, leadEndpoint, leadTopic, }: ChatWidgetProps): import("react/jsx-runtime").JSX.Element;
 export {};
