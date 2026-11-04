@@ -245,6 +245,8 @@ export function ChatWidget({
   // Name + e-mail card: shown after a 503 (assistant down) or 429 (rate limited) answer, so the
   // visitor's question reaches the owner as a lead instead of dying in the chat.
   const [lead, setLead] = useState<"off" | "ask" | "sending" | "error" | "sent">("off");
+  // User messages already sent as a lead: a later card (assistant down again) sends only the newer ones.
+  const leadFrom = useRef(0);
   const listRef = useRef<HTMLDivElement>(null);
   const sidRef = useRef<string | null>(null);
 
@@ -352,7 +354,7 @@ export function ChatWidget({
       site,
       name: String(f.get("name") ?? "").trim(),
       email: String(f.get("email") ?? "").trim(),
-      message: messages.filter((m) => m.role === "user").map((m) => m.content).join("\n"),
+      message: messages.filter((m) => m.role === "user").slice(leadFrom.current).map((m) => m.content).join("\n"),
       topic: leadTopic,
       source: "lead_form",
       hp_url: String(f.get("hp_url") ?? ""),
@@ -374,6 +376,7 @@ export function ChatWidget({
         const token = data?.turnstile ? await getTurnstileToken(data.turnstile) : "";
         if (token) res = await post(token);
       }
+      if (res.ok) leadFrom.current = messages.filter((m) => m.role === "user").length;
       setLead(res.ok ? "sent" : "error");
     } catch {
       setLead("error");
