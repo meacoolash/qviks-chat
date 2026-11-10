@@ -132,7 +132,7 @@ function Linkified({ text, rewrite, onNavigate }) {
     parts.push(text.slice(last));
     return _jsx(_Fragment, { children: parts });
 }
-export function ChatWidget({ site, name, greeting, suggestions: all, accent = "#2f6f5e", labels, links = false, rewriteLink, buttonStyle, icon, endpoint = "/api/chat", leadEndpoint = "/api/lead", leadTopic = "AI chat", }) {
+export function ChatWidget({ site, name, greeting, suggestions: all, accent = "#2f6f5e", labels, links = false, rewriteLink, buttonStyle, icon, endpoint = "/api/chat", leadEndpoint = "/api/lead", leadTopic = "AI chat", leadMarker, }) {
     const t = { ...EN, ...labels };
     const storageKey = `qviks-chat-${site}`;
     const [open, setOpen] = useState(false);
@@ -188,10 +188,27 @@ export function ChatWidget({ site, name, greeting, suggestions: all, accent = "#
         setMessages([...history, { role: "assistant", content: "" }]);
         setInput("");
         setBusy(true);
+        // The visitor keeps chatting instead of filling the card: drop it (a later reply can ask again).
+        setLead((l) => (l === "sending" ? l : "off"));
         let answer = "";
+        let wantsLead = false;
+        // Hide the lead marker, also a half-streamed one at the end ("[[kon").
+        const clean = (s) => {
+            if (!leadMarker)
+                return s;
+            if (s.includes(leadMarker)) {
+                wantsLead = true;
+                s = s.split(leadMarker).join("");
+            }
+            for (let n = Math.min(leadMarker.length - 1, s.length); n > 0; n--) {
+                if (s.endsWith(leadMarker.slice(0, n)))
+                    return s.slice(0, -n);
+            }
+            return s;
+        };
         const append = (chunk) => {
             answer += chunk;
-            setMessages([...history, { role: "assistant", content: answer }]);
+            setMessages([...history, { role: "assistant", content: clean(answer).trimEnd() }]);
         };
         try {
             const params = new URLSearchParams(window.location.search);
@@ -236,12 +253,16 @@ export function ChatWidget({ site, name, greeting, suggestions: all, accent = "#
             // Assistant down or rate limited: the reply text asks for contact details, the card below takes them.
             if (res.status === 503 || res.status === 429)
                 setLead("ask");
+            // The model asked for contact details (it does not know, or the visitor wants a reply by e-mail).
+            else if (wantsLead)
+                setLead((l) => (l === "sending" ? l : "ask"));
         }
         catch {
             append(t.offline);
         }
         finally {
             setBusy(false);
+            answer = clean(answer).trimEnd();
             save([...history, { role: "assistant", content: answer }]);
             setSuggestions(pickSuggestions(all, history.filter((m) => m.role === "user").map((m) => m.content), 2));
         }

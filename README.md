@@ -52,11 +52,17 @@ turnstile }` answer is retried once with a Turnstile token. Labels: `leadName`, 
 `leadError` (in `SK_LABELS`). Write the `down` / `rateLimited` replies so they point at the card ("Nechajte tu svoje
 meno a e-mail..."), not at a form elsewhere on the page.
 
+## When the assistant does not know (since 1.2.0)
+
+Pass `leadMarker` (e.g. `"[[kontakt]]"`) and tell the model in the prompt to end a reply with it when it does not know
+the answer or the visitor wants to be contacted. The widget hides the marker (also while it streams in) and shows the
+same name + e-mail card. The saved Qviks history still contains the marker.
+
 ## Exports
 
 | Path | |
 |---|---|
-| `@qviks/chat` (client) | `ChatWidget`, `SK_LABELS`, types `ChatWidgetProps`, `ChatLabels` (props `leadEndpoint`, `leadTopic` since 1.1.0) |
+| `@qviks/chat` (client) | `ChatWidget`, `SK_LABELS`, types `ChatWidgetProps`, `ChatLabels` (props `leadEndpoint`, `leadTopic` since 1.1.0, `leadMarker` since 1.2.0) |
 | `@qviks/chat/server` | `createChatHandler`, `humanCheckEnabled`, `HUMAN_COOKIE`, types `Assistant`, `ChatReplies`, `ChatHandlerOptions` |
 
 ## Develop

@@ -48,6 +48,11 @@ export type ChatWidgetProps = {
     leadEndpoint?: string;
     /** `topic` of that lead (goes into the owner's e-mail subject). Default: "AI chat". */
     leadTopic?: string;
+    /**
+     * Optional token (e.g. "[[kontakt]]") the site's prompt tells the model to put at the end of a reply when it does not
+     * know the answer or the visitor wants to be contacted. The widget hides it and shows the same name + e-mail card.
+     */
+    leadMarker?: string;
 };
 type Turnstile = {
     render: (el: HTMLElement, opts: Record<string, unknown>) => string;
@@ -58,5 +63,5 @@ declare global {
         turnstile?: Turnstile;
     }
 }
-export declare function ChatWidget({ site, name, greeting, suggestions: all, accent, labels, links, rewriteLink, buttonStyle, icon, endpoint, leadEndpoint, leadTopic, }: ChatWidgetProps): import("react/jsx-runtime").JSX.Element;
+export declare function ChatWidget({ site, name, greeting, suggestions: all, accent, labels, links, rewriteLink, buttonStyle, icon, endpoint, leadEndpoint, leadTopic, leadMarker, }: ChatWidgetProps): import("react/jsx-runtime").JSX.Element;
 export {};

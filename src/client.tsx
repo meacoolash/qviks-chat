@@ -97,6 +97,11 @@ export type ChatWidgetProps = {
   leadEndpoint?: string;
   /** `topic` of that lead (goes into the owner's e-mail subject). Default: "AI chat". */
   leadTopic?: string;
+  /**
+   * Optional token (e.g. "[[kontakt]]") the site's prompt tells the model to put at the end of a reply when it does not
+   * know the answer or the visitor wants to be contacted. The widget hides it and shows the same name + e-mail card.
+   */
+  leadMarker?: string;
 };
 
 const CSS = `
@@ -233,6 +238,7 @@ export function ChatWidget({
   endpoint = "/api/chat",
   leadEndpoint = "/api/lead",
   leadTopic = "AI chat",
+  leadMarker,
 }: ChatWidgetProps) {
   const t = { ...EN, ...labels };
   const storageKey = `qviks-chat-${site}`;
@@ -290,11 +296,26 @@ export function ChatWidget({
     setMessages([...history, { role: "assistant", content: "" }]);
     setInput("");
     setBusy(true);
+    // The visitor keeps chatting instead of filling the card: drop it (a later reply can ask again).
+    setLead((l) => (l === "sending" ? l : "off"));
 
     let answer = "";
+    let wantsLead = false;
+    // Hide the lead marker, also a half-streamed one at the end ("[[kon").
+    const clean = (s: string) => {
+      if (!leadMarker) return s;
+      if (s.includes(leadMarker)) {
+        wantsLead = true;
+        s = s.split(leadMarker).join("");
+      }
+      for (let n = Math.min(leadMarker.length - 1, s.length); n > 0; n--) {
+        if (s.endsWith(leadMarker.slice(0, n))) return s.slice(0, -n);
+      }
+      return s;
+    };
     const append = (chunk: string) => {
       answer += chunk;
-      setMessages([...history, { role: "assistant", content: answer }]);
+      setMessages([...history, { role: "assistant", content: clean(answer).trimEnd() }]);
     };
 
     try {
@@ -337,10 +358,13 @@ export function ChatWidget({
       }
       // Assistant down or rate limited: the reply text asks for contact details, the card below takes them.
       if (res.status === 503 || res.status === 429) setLead("ask");
+      // The model asked for contact details (it does not know, or the visitor wants a reply by e-mail).
+      else if (wantsLead) setLead((l) => (l === "sending" ? l : "ask"));
     } catch {
       append(t.offline);
     } finally {
       setBusy(false);
+      answer = clean(answer).trimEnd();
       save([...history, { role: "assistant", content: answer }]);
       setSuggestions(pickSuggestions(all, history.filter((m) => m.role === "user").map((m) => m.content), 2));
     }
