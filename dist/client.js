@@ -242,6 +242,9 @@ export function ChatWidget({ site, name, greeting, suggestions: all, accent = "#
             }
             if (!res.body || res.status === 428)
                 throw new Error("no body");
+            // 400 / 403 / 404 / 413 carry a bare status text ("Forbidden"): show the offline line, not that text.
+            if (!res.ok && res.status !== 503 && res.status !== 429)
+                throw new Error(`status ${res.status}`);
             const reader = res.body.getReader();
             const decoder = new TextDecoder();
             for (;;) {
