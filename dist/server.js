@@ -1,5 +1,29 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import * as nextServer from "next/server";
 import { hasNotrackCookie, visitorFrom, visitorHeaders } from "@qviks/track/server";
+/**
+ * Work after the response: Next `after()` keeps the function alive until it finished. Outside a request
+ * scope (tests, Next without after) it is awaited instead, never left floating.
+ */
+async function runAfter(fn) {
+    const after = nextServer.after;
+    const safe = async () => {
+        try {
+            await fn();
+        }
+        catch (err) {
+            console.error("[qviks-chat] onError failed:", err instanceof Error ? err.message : err);
+        }
+    };
+    if (after) {
+        try {
+            after(safe);
+            return;
+        }
+        catch { }
+    }
+    await safe();
+}
 const EN = {
     rateLimited: "You've sent a lot of messages in a short time. Please leave your details in the form on this page and we'll get back to you.",
     down: "The assistant is taking a break right now. Please leave your details in the form on this page and we'll get back to you.",
@@ -43,15 +67,19 @@ function rateLimiter(limits) {
  * The first message of a visitor has no pass, so the handler answers 428 with
  * the site key; the widget gets a Turnstile token and resends. The token is
  * verified once, then an HMAC-signed cookie lets the visitor chat for PASS_TTL.
- * Env: TURNSTILE_SITE_KEY + TURNSTILE_SECRET_KEY. Without both the check is off.
+ * Env: TURNSTILE_SITE_KEY + TURNSTILE_SECRET_KEY (or the `turnstile` option). Without keys the check is off.
  */
 export const HUMAN_COOKIE = "chat_pass";
 const PASS_TTL = 6 * 60 * 60; // seconds
-const turnstileSecret = () => process.env.TURNSTILE_SECRET_KEY;
-const turnstileSiteKey = () => process.env.TURNSTILE_SITE_KEY;
-export const humanCheckEnabled = () => !!turnstileSecret() && !!turnstileSiteKey();
-const sign = (exp) => createHmac("sha256", turnstileSecret()).update(`chat:${exp}`).digest("base64url");
-function hasPass(req) {
+function envKeys() {
+    const siteKey = process.env.TURNSTILE_SITE_KEY;
+    const secret = process.env.TURNSTILE_SECRET_KEY;
+    return siteKey && secret ? { siteKey, secret } : null;
+}
+/** True when the env keys are set (sites with per-request keys pass `turnstile` instead). */
+export const humanCheckEnabled = () => !!envKeys();
+const sign = (secret, exp) => createHmac("sha256", secret).update(`chat:${exp}`).digest("base64url");
+function hasPass(req, secret) {
     const raw = req.headers.get("cookie")?.match(/(?:^|;\s*)chat_pass=(\d+)\.([\w-]+)/);
     if (!raw)
         return false;
@@ -59,18 +87,18 @@ function hasPass(req) {
     if (!(exp > Date.now() / 1000))
         return false;
     const a = Buffer.from(raw[2]);
-    const b = Buffer.from(sign(exp));
+    const b = Buffer.from(sign(secret, exp));
     return a.length === b.length && timingSafeEqual(a, b);
 }
-function passCookie() {
+function passCookie(secret) {
     const exp = Math.floor(Date.now() / 1000) + PASS_TTL;
-    return `${HUMAN_COOKIE}=${exp}.${sign(exp)}; Path=/api/chat; Max-Age=${PASS_TTL}; HttpOnly; Secure; SameSite=Strict`;
+    return `${HUMAN_COOKIE}=${exp}.${sign(secret, exp)}; Path=/api/chat; Max-Age=${PASS_TTL}; HttpOnly; Secure; SameSite=Strict`;
 }
-async function verifyToken(token, ip) {
+async function verifyToken(secret, token, ip) {
     if (typeof token !== "string" || !token || token.length > 4096)
         return false;
     const form = new FormData();
-    form.append("secret", turnstileSecret());
+    form.append("secret", secret);
     form.append("response", token);
     if (ip)
         form.append("remoteip", ip);
@@ -178,16 +206,18 @@ export function createChatHandler(opts) {
             return text(replies.rateLimited, 429);
         const openaiKey = opts.openaiKey ?? process.env.OPENAI_API_KEY;
         if (!openaiKey) {
-            void opts.onError?.("OPENAI_API_KEY is not set");
+            if (opts.onError)
+                await runAfter(() => opts.onError("OPENAI_API_KEY is not set"));
             return text(replies.down, 503);
         }
         // Invisible Turnstile once per visitor, then a signed cookie (bots burning OpenAI credit).
         const headers = {};
-        if (humanCheckEnabled() && !hasPass(req)) {
-            if (!(await verifyToken(body.turnstile, visitor.ip))) {
-                return Response.json({ turnstile: turnstileSiteKey() }, { status: 428, headers: { "Cache-Control": "no-store" } });
+        const keys = opts.turnstile ? opts.turnstile(req, body) : envKeys();
+        if (keys && !hasPass(req, keys.secret)) {
+            if (!(await verifyToken(keys.secret, body.turnstile, visitor.ip))) {
+                return Response.json({ turnstile: keys.siteKey }, { status: 428, headers: { "Cache-Control": "no-store" } });
             }
-            headers["Set-Cookie"] = passCookie();
+            headers["Set-Cookie"] = passCookie(keys.secret);
         }
         const locale = str(body.locale, 16);
         const sessionId = typeof body.session_id === "string" && SESSION_ID.test(body.session_id) ? body.session_id : null;
@@ -232,7 +262,12 @@ export function createChatHandler(opts) {
                 console.error("[qviks-chat] history failed:", err instanceof Error ? err.message : err);
             }
         }
-        const messages = [{ role: "system", content: assistant.system({ locale }) }, ...history];
+        const reminder = assistant.reminder?.({ locale });
+        const messages = [
+            { role: "system", content: assistant.system({ locale }) },
+            ...history,
+            ...(reminder ? [{ role: "system", content: reminder }] : []),
+        ];
         const openai = { key: openaiKey, model: opts.model ?? "gpt-4.1-mini", maxTokens: opts.maxTokens ?? 600, messages };
         // OpenAI refused (no credit, bad key, outage): 503 + the site's `down` reply. The widget
         // then asks for name + e-mail and sends the question as a lead, so it is not lost.
@@ -243,7 +278,8 @@ export function createChatHandler(opts) {
         catch (err) {
             const reason = err instanceof Error ? err.message : String(err);
             console.error("[qviks-chat] OpenAI:", reason);
-            void opts.onError?.(reason);
+            if (opts.onError)
+                await runAfter(() => opts.onError(reason));
             await logTurn("");
             return text(replies.down, 503, headers);
         }
@@ -260,8 +296,12 @@ export function createChatHandler(opts) {
                 catch (err) {
                     const reason = err instanceof Error ? err.message : String(err);
                     console.error("[qviks-chat] OpenAI stream:", reason);
-                    void opts.onError?.(reason);
                     controller.enqueue(encoder.encode(answer ? replies.cutOff : replies.down));
+                    // Still inside the response (the stream is open), so awaiting keeps the function alive.
+                    try {
+                        await opts.onError?.(reason);
+                    }
+                    catch { }
                 }
                 finally {
                     await logTurn(answer);

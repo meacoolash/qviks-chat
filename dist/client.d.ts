@@ -1,3 +1,7 @@
+type Msg = {
+    role: "user" | "assistant";
+    content: string;
+};
 /** UI strings; a site passes its own language. Defaults: English. */
 export type ChatLabels = {
     /** Header, "{name}" is replaced by the `name` prop. */
@@ -42,7 +46,7 @@ export type ChatWidgetProps = {
     /**
      * Where the name + e-mail card posts when the assistant is down or rate limited. Default: /api/lead
      * (@qviks/track createLeadHandler or the site's own lead relay). Body: { site, name, email, message (the
-     * visitor's questions), topic, source: "lead_form", hp_url, locale, elapsedMs, turnstile? }; a 428 or
+     * visitor's questions), topic, source: "lead_form", hp_url, locale, chat_session_id, elapsedMs, turnstile? }; a 428 or
      * 400 { error: "turnstile", turnstile: siteKey } answer is retried once with a Turnstile token.
      */
     leadEndpoint?: string;
@@ -53,6 +57,8 @@ export type ChatWidgetProps = {
      * know the answer or the visitor wants to be contacted. The widget hides it and shows the same name + e-mail card.
      */
     leadMarker?: string;
+    /** Own lead sender instead of the built-in POST to `leadEndpoint` (see UseChatOptions). */
+    sendLead?: UseChatOptions["sendLead"];
 };
 type Turnstile = {
     render: (el: HTMLElement, opts: Record<string, unknown>) => string;
@@ -63,5 +69,63 @@ declare global {
         turnstile?: Turnstile;
     }
 }
-export declare function ChatWidget({ site, name, greeting, suggestions: all, accent, labels, links, rewriteLink, buttonStyle, icon, endpoint, leadEndpoint, leadTopic, leadMarker, }: ChatWidgetProps): import("react/jsx-runtime").JSX.Element;
+/** What the name + e-mail card sends (the lead endpoint body, without the bot-check fields). */
+export type ChatLead = {
+    site: string;
+    name: string;
+    email: string;
+    /** The visitor's questions since the last sent card, one per line. */
+    message: string;
+    topic: string;
+    source: "lead_form";
+    hp_url: string;
+    locale?: string;
+    /**
+     * The chat's session id (since 1.3.0). The site relays it to Qviks /api/v1/leads as `chat_session_id`, so the
+     * chat in Qviks gets the lead's contact and the owner's e-mail carries the whole conversation.
+     */
+    chat_session_id?: string;
+};
+export type UseChatOptions = {
+    site: string;
+    /** Example questions; 3 are offered on open, 2 after each reply. */
+    suggestions: string[];
+    /** Only `offline` is used here (the line shown when /api/chat cannot be reached). */
+    labels?: Partial<ChatLabels>;
+    endpoint?: string;
+    leadEndpoint?: string;
+    leadTopic?: string;
+    leadMarker?: string;
+    /** Page language sent to /api/chat and with the lead. Default: <html lang>. */
+    locale?: string;
+    /** Keep the conversation in sessionStorage, so a reload or another page continues it. Default: true. */
+    persist?: boolean;
+    /**
+     * Own lead sender instead of the built-in POST to `leadEndpoint` (e.g. a site's form relay with its own
+     * bot checks). Resolve `ok: false` to show the card's error line.
+     */
+    sendLead?: (lead: ChatLead) => Promise<{
+        ok: boolean;
+    }>;
+};
+/**
+ * Headless chat: conversation, streaming, human check, the name + e-mail card and the lead marker. ChatWidget is
+ * this hook + the default look; a site with its own look renders its own markup on top of it.
+ */
+export declare function useChat({ site, suggestions: all, labels, endpoint, leadEndpoint, leadTopic, leadMarker, locale, persist, sendLead: customSendLead, }: UseChatOptions): {
+    open: boolean;
+    setOpen: import("react").Dispatch<import("react").SetStateAction<boolean>>;
+    toggle: () => void;
+    openChat: () => void;
+    messages: Msg[];
+    input: string;
+    setInput: import("react").Dispatch<import("react").SetStateAction<string>>;
+    busy: boolean;
+    send: (raw: string) => Promise<void>;
+    suggestions: string[];
+    lead: "off" | "ask" | "sending" | "error" | "sent";
+    sendLead: (form: HTMLFormElement) => Promise<void>;
+    listRef: import("react").RefObject<HTMLDivElement | null>;
+};
+export declare function ChatWidget({ site, name, greeting, suggestions: all, accent, labels, links, rewriteLink, buttonStyle, icon, endpoint, leadEndpoint, leadTopic, leadMarker, sendLead: customSendLead, }: ChatWidgetProps): import("react/jsx-runtime").JSX.Element;
 export {};

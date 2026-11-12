@@ -101,4 +101,44 @@ describe("createChatHandler", () => {
     expect(turn.visitor_id).toBeUndefined();
     expect((calls[1].init?.headers as Record<string, string>)["x-qviks-visitor-id"]).toBeUndefined();
   });
+
+  it("per-request Turnstile keys: 428 with that site's key, a valid pass cookie skips the check", async () => {
+    const calls = fakeFetch(["ok"]);
+    const POST = createChatHandler({
+      assistant,
+      openaiKey: "sk-test",
+      turnstile: (_req, body) => (body.site === "a" ? { siteKey: "key-a", secret: "secret-a" } : null),
+    });
+    const res = await POST(chatReq({ ...ask, site: "a" }));
+    expect(res.status).toBe(428);
+    expect(await res.json()).toEqual({ turnstile: "key-a" });
+    // Site without keys: no check.
+    expect((await POST(chatReq({ ...ask, site: "b" }))).status).toBe(200);
+    // Same cookie format as before (chat_pass=<exp>.<hmac of chat:<exp>>), so passes from older code keep working.
+    const { createHmac } = await import("node:crypto");
+    const exp = Math.floor(Date.now() / 1000) + 600;
+    const cookie = `chat_pass=${exp}.${createHmac("sha256", "secret-a").update(`chat:${exp}`).digest("base64url")}`;
+    expect((await POST(chatReq({ ...ask, site: "a" }, { cookie, ip: "5.5.5.5" }))).status).toBe(200);
+    expect(calls.some((c) => c.url.includes("siteverify"))).toBe(false);
+  });
+
+  it("reminder goes last, after the conversation", async () => {
+    const calls = fakeFetch(["ok"]);
+    const POST = createChatHandler({ assistant: { ...assistant, reminder: ({ locale }) => `reply in ${locale}` }, openaiKey: "sk-test" });
+    await (await POST(chatReq(ask, { ip: "6.6.6.6" }))).text();
+    const openai = JSON.parse(String(calls[0].init?.body));
+    expect(openai.messages.at(-1)).toEqual({ role: "system", content: "reply in sk" });
+    expect(openai.messages.at(-2)).toEqual({ role: "user", content: "Ahoj?" });
+  });
+
+  it("missing OpenAI key: 503 and onError is awaited outside a request scope", async () => {
+    const reasons: string[] = [];
+    const POST = createChatHandler({ assistant, openaiKey: "", onError: async (r) => void reasons.push(r) });
+    const prev = process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    const res = await POST(chatReq(ask, { ip: "7.7.7.7" }));
+    if (prev) process.env.OPENAI_API_KEY = prev;
+    expect(res.status).toBe(503);
+    expect(reasons).toEqual(["OPENAI_API_KEY is not set"]);
+  });
 });

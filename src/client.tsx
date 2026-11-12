@@ -91,7 +91,7 @@ export type ChatWidgetProps = {
   /**
    * Where the name + e-mail card posts when the assistant is down or rate limited. Default: /api/lead
    * (@qviks/track createLeadHandler or the site's own lead relay). Body: { site, name, email, message (the
-   * visitor's questions), topic, source: "lead_form", hp_url, locale, elapsedMs, turnstile? }; a 428 or
+   * visitor's questions), topic, source: "lead_form", hp_url, locale, chat_session_id, elapsedMs, turnstile? }; a 428 or
    * 400 { error: "turnstile", turnstile: siteKey } answer is retried once with a Turnstile token.
    */
   leadEndpoint?: string;
@@ -102,6 +102,8 @@ export type ChatWidgetProps = {
    * know the answer or the visitor wants to be contacted. The widget hides it and shows the same name + e-mail card.
    */
   leadMarker?: string;
+  /** Own lead sender instead of the built-in POST to `leadEndpoint` (see UseChatOptions). */
+  sendLead?: UseChatOptions["sendLead"];
 };
 
 const CSS = `
@@ -224,23 +226,62 @@ function Linkified({ text, rewrite, onNavigate }: { text: string; rewrite?: (url
   return <>{parts}</>;
 }
 
-export function ChatWidget({
+/** What the name + e-mail card sends (the lead endpoint body, without the bot-check fields). */
+export type ChatLead = {
+  site: string;
+  name: string;
+  email: string;
+  /** The visitor's questions since the last sent card, one per line. */
+  message: string;
+  topic: string;
+  source: "lead_form";
+  hp_url: string;
+  locale?: string;
+  /**
+   * The chat's session id (since 1.3.0). The site relays it to Qviks /api/v1/leads as `chat_session_id`, so the
+   * chat in Qviks gets the lead's contact and the owner's e-mail carries the whole conversation.
+   */
+  chat_session_id?: string;
+};
+
+export type UseChatOptions = {
+  site: string;
+  /** Example questions; 3 are offered on open, 2 after each reply. */
+  suggestions: string[];
+  /** Only `offline` is used here (the line shown when /api/chat cannot be reached). */
+  labels?: Partial<ChatLabels>;
+  endpoint?: string;
+  leadEndpoint?: string;
+  leadTopic?: string;
+  leadMarker?: string;
+  /** Page language sent to /api/chat and with the lead. Default: <html lang>. */
+  locale?: string;
+  /** Keep the conversation in sessionStorage, so a reload or another page continues it. Default: true. */
+  persist?: boolean;
+  /**
+   * Own lead sender instead of the built-in POST to `leadEndpoint` (e.g. a site's form relay with its own
+   * bot checks). Resolve `ok: false` to show the card's error line.
+   */
+  sendLead?: (lead: ChatLead) => Promise<{ ok: boolean }>;
+};
+
+/**
+ * Headless chat: conversation, streaming, human check, the name + e-mail card and the lead marker. ChatWidget is
+ * this hook + the default look; a site with its own look renders its own markup on top of it.
+ */
+export function useChat({
   site,
-  name,
-  greeting,
   suggestions: all,
-  accent = "#2f6f5e",
   labels,
-  links = false,
-  rewriteLink,
-  buttonStyle,
-  icon,
   endpoint = "/api/chat",
   leadEndpoint = "/api/lead",
   leadTopic = "AI chat",
   leadMarker,
-}: ChatWidgetProps) {
-  const t = { ...EN, ...labels };
+  locale,
+  persist = true,
+  sendLead: customSendLead,
+}: UseChatOptions) {
+  const offline = labels?.offline ?? EN.offline;
   const storageKey = `qviks-chat-${site}`;
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState<Msg[]>([]);
@@ -258,6 +299,7 @@ export function ChatWidget({
 
   // Restore the conversation after mount (sessionStorage is browser-only).
   useEffect(() => {
+    if (!persist) return;
     try {
       const raw = sessionStorage.getItem(storageKey);
       if (!raw) return;
@@ -267,24 +309,30 @@ export function ChatWidget({
         setMessages(stored.messages);
       }
     } catch {}
-  }, [storageKey]);
+  }, [storageKey, persist]);
 
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
   }, [messages, suggestions, open, lead]);
 
   function save(next: Msg[]) {
-    if (!sidRef.current) return;
+    if (!persist || !sidRef.current) return;
     try {
       sessionStorage.setItem(storageKey, JSON.stringify({ sid: sidRef.current, messages: next } satisfies Stored));
     } catch {}
   }
 
+  const asked = (list: Msg[]) => list.filter((m) => m.role === "user").map((m) => m.content);
+
   function toggle() {
-    if (!open && suggestions.length === 0) {
-      setSuggestions(pickSuggestions(all, messages.filter((m) => m.role === "user").map((m) => m.content), 3));
-    }
+    if (!open && suggestions.length === 0) setSuggestions(pickSuggestions(all, asked(messages), 3));
     setOpen((o) => !o);
+  }
+
+  /** Opens the chat (e.g. from a button elsewhere on the page). */
+  function openChat() {
+    setSuggestions((s) => (s.length ? s : pickSuggestions(all, asked(messages), 3)));
+    setOpen(true);
   }
 
   async function send(raw: string) {
@@ -330,7 +378,7 @@ export function ChatWidget({
             session_id: sidRef.current,
             messages: history,
             path: window.location.pathname,
-            locale: document.documentElement.lang || undefined,
+            locale: locale || document.documentElement.lang || undefined,
             referrer: document.referrer || undefined,
             utm_source: params.get("utm_source") ?? undefined,
             utm_medium: params.get("utm_medium") ?? undefined,
@@ -363,51 +411,90 @@ export function ChatWidget({
       // The model asked for contact details (it does not know, or the visitor wants a reply by e-mail).
       else if (wantsLead) setLead((l) => (l === "sending" ? l : "ask"));
     } catch {
-      append(t.offline);
+      append(offline);
     } finally {
       setBusy(false);
       answer = clean(answer).trimEnd();
       save([...history, { role: "assistant", content: answer }]);
-      setSuggestions(pickSuggestions(all, history.filter((m) => m.role === "user").map((m) => m.content), 2));
+      setSuggestions(pickSuggestions(all, asked(history), 2));
     }
   }
 
-  async function sendLead(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault();
+  /** Sends the card (its form has the fields name, email and the hp_url honeypot). */
+  async function sendLead(form: HTMLFormElement) {
     if (lead === "sending") return;
-    const f = new FormData(e.currentTarget);
-    const body = {
+    const f = new FormData(form);
+    const body: ChatLead = {
       site,
       name: String(f.get("name") ?? "").trim(),
       email: String(f.get("email") ?? "").trim(),
-      message: messages.filter((m) => m.role === "user").slice(leadFrom.current).map((m) => m.content).join("\n"),
+      message: asked(messages).slice(leadFrom.current).join("\n"),
       topic: leadTopic,
       source: "lead_form",
       hp_url: String(f.get("hp_url") ?? ""),
-      locale: document.documentElement.lang || undefined,
+      locale: locale || document.documentElement.lang || undefined,
+      chat_session_id: sidRef.current ?? undefined,
     };
     if (!body.name || !body.email) return;
     setLead("sending");
     try {
-      const post = (turnstile?: string) =>
-        fetch(leadEndpoint, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ...body, turnstile, elapsedMs: Math.round(performance.now()) }),
-        });
-      let res = await post();
-      // The lead endpoint wants a human check: 428 (createLeadHandler) or 400 { error: "turnstile" } (sites).
-      const data = res.ok ? null : ((await res.clone().json().catch(() => null)) as { error?: string; turnstile?: string } | null);
-      if (res.status === 428 || (res.status === 400 && data?.error === "turnstile")) {
-        const token = data?.turnstile ? await getTurnstileToken(data.turnstile) : "";
-        if (token) res = await post(token);
-      }
-      if (res.ok) leadFrom.current = messages.filter((m) => m.role === "user").length;
-      setLead(res.ok ? "sent" : "error");
+      const ok = customSendLead ? (await customSendLead(body)).ok : await postLead(leadEndpoint, body);
+      if (ok) leadFrom.current = asked(messages).length;
+      setLead(ok ? "sent" : "error");
     } catch {
       setLead("error");
     }
   }
+
+  return { open, setOpen, toggle, openChat, messages, input, setInput, busy, send, suggestions, lead, sendLead, listRef };
+}
+
+/** Built-in lead post; a 428 or 400 { error: "turnstile" } answer is retried once with a Turnstile token. */
+async function postLead(endpoint: string, body: ChatLead): Promise<boolean> {
+  const post = (turnstile?: string) =>
+    fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...body, turnstile, elapsedMs: Math.round(performance.now()) }),
+    });
+  let res = await post();
+  // The lead endpoint wants a human check: 428 (createLeadHandler) or 400 { error: "turnstile" } (sites).
+  const data = res.ok ? null : ((await res.clone().json().catch(() => null)) as { error?: string; turnstile?: string } | null);
+  if (res.status === 428 || (res.status === 400 && data?.error === "turnstile")) {
+    const token = data?.turnstile ? await getTurnstileToken(data.turnstile) : "";
+    if (token) res = await post(token);
+  }
+  return res.ok;
+}
+
+export function ChatWidget({
+  site,
+  name,
+  greeting,
+  suggestions: all,
+  accent = "#2f6f5e",
+  labels,
+  links = false,
+  rewriteLink,
+  buttonStyle,
+  icon,
+  endpoint,
+  leadEndpoint,
+  leadTopic,
+  leadMarker,
+  sendLead: customSendLead,
+}: ChatWidgetProps) {
+  const t = { ...EN, ...labels };
+  const { open, setOpen, toggle, messages, input, setInput, busy, send, suggestions, lead, sendLead, listRef } = useChat({
+    site,
+    suggestions: all,
+    labels,
+    endpoint,
+    leadEndpoint,
+    leadTopic,
+    leadMarker,
+    sendLead: customSendLead,
+  });
 
   const shown: Msg[] = [{ role: "assistant", content: greeting }, ...messages];
 
@@ -438,7 +525,13 @@ export function ChatWidget({
             ))}
             {lead === "sent" && <div className="qc-msg qc-bot">🎉 {t.leadSent}</div>}
             {lead !== "off" && lead !== "sent" && (
-              <form onSubmit={sendLead} className="qc-lead">
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void sendLead(e.currentTarget);
+                }}
+                className="qc-lead"
+              >
                 <input name="hp_url" tabIndex={-1} autoComplete="off" aria-hidden="true" className="qc-hp" />
                 <input required name="name" autoComplete="name" placeholder={t.leadName} aria-label={t.leadName} maxLength={120} className="qc-in" />
                 <input required type="email" name="email" autoComplete="email" placeholder={t.leadEmail} aria-label={t.leadEmail} className="qc-in" />

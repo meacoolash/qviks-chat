@@ -132,8 +132,12 @@ function Linkified({ text, rewrite, onNavigate }) {
     parts.push(text.slice(last));
     return _jsx(_Fragment, { children: parts });
 }
-export function ChatWidget({ site, name, greeting, suggestions: all, accent = "#2f6f5e", labels, links = false, rewriteLink, buttonStyle, icon, endpoint = "/api/chat", leadEndpoint = "/api/lead", leadTopic = "AI chat", leadMarker, }) {
-    const t = { ...EN, ...labels };
+/**
+ * Headless chat: conversation, streaming, human check, the name + e-mail card and the lead marker. ChatWidget is
+ * this hook + the default look; a site with its own look renders its own markup on top of it.
+ */
+export function useChat({ site, suggestions: all, labels, endpoint = "/api/chat", leadEndpoint = "/api/lead", leadTopic = "AI chat", leadMarker, locale, persist = true, sendLead: customSendLead, }) {
+    const offline = labels?.offline ?? EN.offline;
     const storageKey = `qviks-chat-${site}`;
     const [open, setOpen] = useState(false);
     const [messages, setMessages] = useState([]);
@@ -150,6 +154,8 @@ export function ChatWidget({ site, name, greeting, suggestions: all, accent = "#
     const sidRef = useRef(null);
     // Restore the conversation after mount (sessionStorage is browser-only).
     useEffect(() => {
+        if (!persist)
+            return;
         try {
             const raw = sessionStorage.getItem(storageKey);
             if (!raw)
@@ -161,23 +167,28 @@ export function ChatWidget({ site, name, greeting, suggestions: all, accent = "#
             }
         }
         catch { }
-    }, [storageKey]);
+    }, [storageKey, persist]);
     useEffect(() => {
         listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
     }, [messages, suggestions, open, lead]);
     function save(next) {
-        if (!sidRef.current)
+        if (!persist || !sidRef.current)
             return;
         try {
             sessionStorage.setItem(storageKey, JSON.stringify({ sid: sidRef.current, messages: next }));
         }
         catch { }
     }
+    const asked = (list) => list.filter((m) => m.role === "user").map((m) => m.content);
     function toggle() {
-        if (!open && suggestions.length === 0) {
-            setSuggestions(pickSuggestions(all, messages.filter((m) => m.role === "user").map((m) => m.content), 3));
-        }
+        if (!open && suggestions.length === 0)
+            setSuggestions(pickSuggestions(all, asked(messages), 3));
         setOpen((o) => !o);
+    }
+    /** Opens the chat (e.g. from a button elsewhere on the page). */
+    function openChat() {
+        setSuggestions((s) => (s.length ? s : pickSuggestions(all, asked(messages), 3)));
+        setOpen(true);
     }
     async function send(raw) {
         const text = raw.trim();
@@ -221,7 +232,7 @@ export function ChatWidget({ site, name, greeting, suggestions: all, accent = "#
                     session_id: sidRef.current,
                     messages: history,
                     path: window.location.pathname,
-                    locale: document.documentElement.lang || undefined,
+                    locale: locale || document.documentElement.lang || undefined,
                     referrer: document.referrer || undefined,
                     utm_source: params.get("utm_source") ?? undefined,
                     utm_medium: params.get("utm_medium") ?? undefined,
@@ -261,57 +272,80 @@ export function ChatWidget({ site, name, greeting, suggestions: all, accent = "#
                 setLead((l) => (l === "sending" ? l : "ask"));
         }
         catch {
-            append(t.offline);
+            append(offline);
         }
         finally {
             setBusy(false);
             answer = clean(answer).trimEnd();
             save([...history, { role: "assistant", content: answer }]);
-            setSuggestions(pickSuggestions(all, history.filter((m) => m.role === "user").map((m) => m.content), 2));
+            setSuggestions(pickSuggestions(all, asked(history), 2));
         }
     }
-    async function sendLead(e) {
-        e.preventDefault();
+    /** Sends the card (its form has the fields name, email and the hp_url honeypot). */
+    async function sendLead(form) {
         if (lead === "sending")
             return;
-        const f = new FormData(e.currentTarget);
+        const f = new FormData(form);
         const body = {
             site,
             name: String(f.get("name") ?? "").trim(),
             email: String(f.get("email") ?? "").trim(),
-            message: messages.filter((m) => m.role === "user").slice(leadFrom.current).map((m) => m.content).join("\n"),
+            message: asked(messages).slice(leadFrom.current).join("\n"),
             topic: leadTopic,
             source: "lead_form",
             hp_url: String(f.get("hp_url") ?? ""),
-            locale: document.documentElement.lang || undefined,
+            locale: locale || document.documentElement.lang || undefined,
+            chat_session_id: sidRef.current ?? undefined,
         };
         if (!body.name || !body.email)
             return;
         setLead("sending");
         try {
-            const post = (turnstile) => fetch(leadEndpoint, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ ...body, turnstile, elapsedMs: Math.round(performance.now()) }),
-            });
-            let res = await post();
-            // The lead endpoint wants a human check: 428 (createLeadHandler) or 400 { error: "turnstile" } (sites).
-            const data = res.ok ? null : (await res.clone().json().catch(() => null));
-            if (res.status === 428 || (res.status === 400 && data?.error === "turnstile")) {
-                const token = data?.turnstile ? await getTurnstileToken(data.turnstile) : "";
-                if (token)
-                    res = await post(token);
-            }
-            if (res.ok)
-                leadFrom.current = messages.filter((m) => m.role === "user").length;
-            setLead(res.ok ? "sent" : "error");
+            const ok = customSendLead ? (await customSendLead(body)).ok : await postLead(leadEndpoint, body);
+            if (ok)
+                leadFrom.current = asked(messages).length;
+            setLead(ok ? "sent" : "error");
         }
         catch {
             setLead("error");
         }
     }
+    return { open, setOpen, toggle, openChat, messages, input, setInput, busy, send, suggestions, lead, sendLead, listRef };
+}
+/** Built-in lead post; a 428 or 400 { error: "turnstile" } answer is retried once with a Turnstile token. */
+async function postLead(endpoint, body) {
+    const post = (turnstile) => fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...body, turnstile, elapsedMs: Math.round(performance.now()) }),
+    });
+    let res = await post();
+    // The lead endpoint wants a human check: 428 (createLeadHandler) or 400 { error: "turnstile" } (sites).
+    const data = res.ok ? null : (await res.clone().json().catch(() => null));
+    if (res.status === 428 || (res.status === 400 && data?.error === "turnstile")) {
+        const token = data?.turnstile ? await getTurnstileToken(data.turnstile) : "";
+        if (token)
+            res = await post(token);
+    }
+    return res.ok;
+}
+export function ChatWidget({ site, name, greeting, suggestions: all, accent = "#2f6f5e", labels, links = false, rewriteLink, buttonStyle, icon, endpoint, leadEndpoint, leadTopic, leadMarker, sendLead: customSendLead, }) {
+    const t = { ...EN, ...labels };
+    const { open, setOpen, toggle, messages, input, setInput, busy, send, suggestions, lead, sendLead, listRef } = useChat({
+        site,
+        suggestions: all,
+        labels,
+        endpoint,
+        leadEndpoint,
+        leadTopic,
+        leadMarker,
+        sendLead: customSendLead,
+    });
     const shown = [{ role: "assistant", content: greeting }, ...messages];
-    return (_jsxs("div", { style: { "--qc-accent": accent }, children: [_jsx("style", { children: CSS }), open && (_jsxs("div", { className: "qc-panel", role: "dialog", "aria-label": t.header.replace("{name}", name), children: [_jsxs("div", { className: "qc-head", children: [_jsx("span", { children: t.header.replace("{name}", name) }), _jsx("button", { type: "button", onClick: () => setOpen(false), className: "qc-x", "aria-label": t.closeChat, children: t.close })] }), _jsxs("div", { ref: listRef, className: "qc-list", "aria-live": "polite", children: [shown.map((m, i) => (_jsx("div", { className: `qc-msg ${m.role === "user" ? "qc-user" : "qc-bot"}`, children: m.content ? (links && m.role === "assistant" ? (_jsx(Linkified, { text: m.content, rewrite: rewriteLink, onNavigate: () => setOpen(false) })) : (m.content)) : (_jsx("span", { className: "qc-dim", children: t.typing })) }, i))), lead === "sent" && _jsxs("div", { className: "qc-msg qc-bot", children: ["\uD83C\uDF89 ", t.leadSent] }), lead !== "off" && lead !== "sent" && (_jsxs("form", { onSubmit: sendLead, className: "qc-lead", children: [_jsx("input", { name: "hp_url", tabIndex: -1, autoComplete: "off", "aria-hidden": "true", className: "qc-hp" }), _jsx("input", { required: true, name: "name", autoComplete: "name", placeholder: t.leadName, "aria-label": t.leadName, maxLength: 120, className: "qc-in" }), _jsx("input", { required: true, type: "email", name: "email", autoComplete: "email", placeholder: t.leadEmail, "aria-label": t.leadEmail, className: "qc-in" }), lead === "error" && _jsx("p", { className: "qc-err", children: t.leadError }), _jsx("button", { disabled: lead === "sending", className: "qc-send qc-lead-send", children: t.leadSend })] })), !busy && (lead === "off" || lead === "sent") && suggestions.length > 0 && (_jsx("div", { className: "qc-sugs", children: suggestions.map((q) => (_jsx("button", { type: "button", onClick: () => send(q), className: "qc-sug", children: q }, q))) }))] }), _jsxs("form", { onSubmit: (e) => {
+    return (_jsxs("div", { style: { "--qc-accent": accent }, children: [_jsx("style", { children: CSS }), open && (_jsxs("div", { className: "qc-panel", role: "dialog", "aria-label": t.header.replace("{name}", name), children: [_jsxs("div", { className: "qc-head", children: [_jsx("span", { children: t.header.replace("{name}", name) }), _jsx("button", { type: "button", onClick: () => setOpen(false), className: "qc-x", "aria-label": t.closeChat, children: t.close })] }), _jsxs("div", { ref: listRef, className: "qc-list", "aria-live": "polite", children: [shown.map((m, i) => (_jsx("div", { className: `qc-msg ${m.role === "user" ? "qc-user" : "qc-bot"}`, children: m.content ? (links && m.role === "assistant" ? (_jsx(Linkified, { text: m.content, rewrite: rewriteLink, onNavigate: () => setOpen(false) })) : (m.content)) : (_jsx("span", { className: "qc-dim", children: t.typing })) }, i))), lead === "sent" && _jsxs("div", { className: "qc-msg qc-bot", children: ["\uD83C\uDF89 ", t.leadSent] }), lead !== "off" && lead !== "sent" && (_jsxs("form", { onSubmit: (e) => {
+                                    e.preventDefault();
+                                    void sendLead(e.currentTarget);
+                                }, className: "qc-lead", children: [_jsx("input", { name: "hp_url", tabIndex: -1, autoComplete: "off", "aria-hidden": "true", className: "qc-hp" }), _jsx("input", { required: true, name: "name", autoComplete: "name", placeholder: t.leadName, "aria-label": t.leadName, maxLength: 120, className: "qc-in" }), _jsx("input", { required: true, type: "email", name: "email", autoComplete: "email", placeholder: t.leadEmail, "aria-label": t.leadEmail, className: "qc-in" }), lead === "error" && _jsx("p", { className: "qc-err", children: t.leadError }), _jsx("button", { disabled: lead === "sending", className: "qc-send qc-lead-send", children: t.leadSend })] })), !busy && (lead === "off" || lead === "sent") && suggestions.length > 0 && (_jsx("div", { className: "qc-sugs", children: suggestions.map((q) => (_jsx("button", { type: "button", onClick: () => send(q), className: "qc-sug", children: q }, q))) }))] }), _jsxs("form", { onSubmit: (e) => {
                             e.preventDefault();
                             send(input);
                         }, className: "qc-form", children: [_jsx("input", { value: input, onChange: (e) => setInput(e.target.value), placeholder: t.placeholder, maxLength: 2000, className: "qc-in", "aria-label": t.placeholder }), _jsx("button", { disabled: busy, className: "qc-send", children: t.send })] })] })), _jsx("button", { type: "button", onClick: toggle, className: "qc-btn", style: buttonStyle, "aria-label": icon ? (open ? t.closeChat : t.open) : undefined, title: icon ? (open ? t.closeChat : t.open) : undefined, children: icon ? (open ? (_jsx("svg", { width: "20", height: "20", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.8", strokeLinecap: "round", "aria-hidden": true, children: _jsx("path", { d: "M6 6l12 12M18 6L6 18" }) })) : (icon)) : open ? (t.closeChat) : (t.open) })] }));

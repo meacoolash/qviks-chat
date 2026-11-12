@@ -17,7 +17,7 @@ No secrets live here: keys come from each project's environment.
 ## Install
 
 ```sh
-bun add github:meacoolash/qviks-chat#v1.0.0
+bun add github:meacoolash/qviks-chat#v1.3.0
 ```
 
 Env (server only): `OPENAI_API_KEY`, `QVIKS_API_URL` + the org key (e.g. `QVIKS_API_KEY`) for history,
@@ -39,8 +39,10 @@ import { ChatWidget, SK_LABELS } from "@qviks/chat";
 <ChatWidget site="mysite" name="Jana" greeting="Dobrý deň..." suggestions={["..."]} accent="#2f6f5e" labels={SK_LABELS} links />
 ```
 
-One app serving many sites: `assistant: (req, body) => ASSISTANTS[body.site]` and `key: (req, body) => ...`.
-Alerts when OpenAI fails: `onError: (reason) => sendMail(...)` (throttle on your side).
+One app serving many sites: `assistant: (req, body) => ASSISTANTS[body.site]`, `key: (req, body) => ...` and, when
+each site has its own Turnstile widget, `turnstile: (req, body) => ({ siteKey, secret })` (default: the env keys).
+Alerts when OpenAI fails: `onError: (reason) => sendMail(...)` (runs after the response via Next `after()`; throttle
+on your side). `assistant.reminder: ({ locale }) => "..."` is sent once more as the last system message.
 
 ## When the assistant is down
 
@@ -58,12 +60,25 @@ Pass `leadMarker` (e.g. `"[[kontakt]]"`) and tell the model in the prompt to end
 the answer or the visitor wants to be contacted. The widget hides the marker (also while it streams in) and shows the
 same name + e-mail card. The saved Qviks history still contains the marker.
 
+## Lead linked to the chat (since 1.3.0)
+
+The card's lead carries `chat_session_id` (the chat's session id). A site relay that forwards it to Qviks
+`POST /api/v1/leads` lets Qviks put the lead's contact on the chat (admin Chats shows who wrote) and mail the owner
+the whole conversation (questions and answers) instead of only the questions. Older Qviks ignore the field.
+
+## Own look (since 1.3.0)
+
+`useChat({ site, suggestions, labels?, endpoint?, leadEndpoint?, leadTopic?, leadMarker?, locale?, persist?, sendLead? })`
+is the widget without markup: `{ open, setOpen, toggle, openChat, messages, input, setInput, busy, send, suggestions,
+lead, sendLead(form), listRef }`. A site with its own design renders its markup on top of it, so the logic (stream,
+human check, card, marker, session) stays here. `sendLead` replaces the built-in POST (e.g. a site's form relay).
+
 ## Exports
 
 | Path | |
 |---|---|
-| `@qviks/chat` (client) | `ChatWidget`, `SK_LABELS`, types `ChatWidgetProps`, `ChatLabels` (props `leadEndpoint`, `leadTopic` since 1.1.0, `leadMarker` since 1.2.0) |
-| `@qviks/chat/server` | `createChatHandler`, `humanCheckEnabled`, `HUMAN_COOKIE`, types `Assistant`, `ChatReplies`, `ChatHandlerOptions` |
+| `@qviks/chat` (client) | `ChatWidget`, `useChat`, `SK_LABELS`, types `ChatWidgetProps`, `ChatLabels`, `ChatLead`, `UseChatOptions` (props `leadEndpoint`, `leadTopic` since 1.1.0, `leadMarker` since 1.2.0, `useChat` + `sendLead` since 1.3.0) |
+| `@qviks/chat/server` | `createChatHandler`, `humanCheckEnabled`, `HUMAN_COOKIE`, types `Assistant`, `ChatReplies`, `ChatHandlerOptions`, `TurnstileKeys` (options `turnstile`, `reminder` since 1.3.0) |
 
 ## Develop
 

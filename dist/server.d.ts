@@ -13,6 +13,18 @@ export type Assistant = {
     }) => string;
     /** Server replies in the site's language; missing ones fall back to English. */
     replies?: Partial<ChatReplies>;
+    /**
+     * Optional short rule sent once more as the LAST system message, after the conversation (a small model follows
+     * the latest instruction best, e.g. "reply in Slovak"). Empty = nothing appended.
+     */
+    reminder?: (ctx: {
+        locale?: string;
+    }) => string | undefined;
+};
+/** Turnstile keys of one site (one widget per client). */
+export type TurnstileKeys = {
+    siteKey: string;
+    secret: string;
 };
 type KeyOption = string | undefined | ((req: Request, body: Record<string, unknown>) => string | null | undefined);
 export type ChatHandlerOptions = {
@@ -34,12 +46,19 @@ export type ChatHandlerOptions = {
         windowMs: number;
     }[];
     /**
-     * Called when OpenAI fails (missing key, no credit, outage), e.g. to send an alert mail.
-     * Not awaited by the visitor's answer; throttle on your side.
+     * Turnstile keys for the human check, per request (one app serving many sites, each with its own widget).
+     * Default: env TURNSTILE_SITE_KEY + TURNSTILE_SECRET_KEY. null = check off for that request.
+     */
+    turnstile?: (req: Request, body: Record<string, unknown>) => TurnstileKeys | null | undefined;
+    /**
+     * Called when OpenAI fails (missing key, no credit, outage), e.g. to send an alert mail. Runs after the
+     * response via Next `after()` (a serverless function would freeze a fire-and-forget call), mid-stream
+     * failures are awaited before the stream closes. Throttle on your side.
      */
     onError?: (reason: string) => void | Promise<void>;
 };
 export declare const HUMAN_COOKIE = "chat_pass";
+/** True when the env keys are set (sites with per-request keys pass `turnstile` instead). */
 export declare const humanCheckEnabled: () => boolean;
 /**
  * Body from the widget: { session_id, messages: [{ role, content }], path?, locale?,
